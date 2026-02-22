@@ -9,6 +9,7 @@ import wandb
 import os
 
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
 
 from dataclasses import dataclass
 import tyro
@@ -69,15 +70,17 @@ def make_train_valid_dfs():
         train_ids = [id_ for id_ in image_ids if id_ not in valid_ids]
         return train_ids, valid_ids
 
-def train_epoch(model, train_loader, optimizer, lr_scheduler, step):
+def train_epoch(model, train_loader, optimizer, lr_scheduler, step, scaler):
     loss_meter = AvgMeter()
     tqdm_object = tqdm(train_loader, total=len(train_loader))
     for batch in tqdm_object:
         batch = {k: v.to(CFG.device) for k, v in batch.items()}
-        loss = model(batch)
+        with autocast():
+            loss = model(batch)
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         if step == "batch":
             lr_scheduler.step()
 
@@ -137,6 +140,7 @@ def main():
     step = "epoch"
 
     writer = SummaryWriter(log_dir=CFG.logdir)
+    scaler = GradScaler() # Initialize GradScaler
 
     wandb.watch(model)
     best_loss = float('inf')
@@ -144,7 +148,7 @@ def main():
         print(f"Epoch: {epoch + 1}")
         model.train()
         train_loss = train_epoch(
-            model, train_loader, optimizer, lr_scheduler, step)
+            model, train_loader, optimizer, lr_scheduler, step, scaler) # Pass scaler
         model.eval()
         with torch.no_grad():
             valid_loss = valid_epoch(model, valid_loader)
